@@ -4,6 +4,32 @@ import { Input } from './input';
 import { Piece, Player, TurnStage } from './player';
 import { Board } from './board';
 
+// Define interfaces for game state
+export interface PieceState {
+  id: number;
+  cellId: number;
+  jailed: boolean;
+  isHome: boolean;
+  pos: number; // position in its path
+}
+
+export interface PlayerState {
+  color: string;
+  playing: boolean;
+  pieces: PieceState[];
+  diceRolled: boolean;
+  diceNumber: number; // The actual face value, 1-6
+  turnStage: TurnStage;
+  hasWon: boolean;
+}
+
+export interface LudoGameState {
+  players: { [color: string]: PlayerState }; // Using a map for easy lookup by color
+  currentPlayerColor: string;
+  gameOver: boolean;
+  winnerColor: string | null;
+}
+
 class Background{
     ctx: CanvasRenderingContext2D;
     sprite: HTMLImageElement;
@@ -57,6 +83,37 @@ class LudoGame{
         this.ctx = this.canvas.getContext('2d')
         this.background = new Background(this.ctx, 'ludo_bg.png', this.canvas.height, this.canvas.width);
 
+        // Create and append Save Game button
+        const saveButton = document.createElement('button');
+        saveButton.id = 'saveGameBtn';
+        saveButton.textContent = 'Save Game';
+        saveButton.style.padding = '10px';
+        saveButton.style.margin = '5px';
+        document.body.appendChild(saveButton);
+
+        saveButton.addEventListener('click', () => {
+            this.saveGameState();
+            alert('Game Saved!');
+        });
+
+        // Create and append Load Game button
+        const loadButton = document.createElement('button');
+        loadButton.id = 'loadGameBtn';
+        loadButton.textContent = 'Load Game';
+        loadButton.style.padding = '10px';
+        loadButton.style.margin = '5px';
+        document.body.appendChild(loadButton);
+
+        loadButton.addEventListener('click', () => {
+            if (this.loadGameState()) {
+                alert('Game Loaded!');
+                // The game state is now loaded. The existing render loop in startGameLoop
+                // will pick up the changes and redraw the board on the next frame.
+            } else {
+                alert('No saved game found or failed to load.');
+            }
+        });
+
         
         this.input = new Input(this.canvas, this.ctx);
 
@@ -81,6 +138,15 @@ class LudoGame{
             this.board.jail(this.player3.pieces[i], this.player3.color);
             this.board.jail(this.player4.pieces[i], this.player4.color);
         }
+
+        // Attempt to load game state. If it fails, the game starts fresh.
+        // Initial jailing above ensures pieces are in a known state if no save is loaded.
+        if (!this.loadGameState()) {
+            console.log("Starting a new game as no saved state was loaded or load failed.");
+            // Any additional new game setup that loadGameState might have superseded can go here.
+            // For now, the initial jailing is the main setup.
+        }
+
         this.startGameLoop();
     }
 
@@ -135,6 +201,7 @@ class LudoGame{
             if (player.hasWon) {
                 this.gameOver = true;
                 this.winner = player;
+                this.saveGameState(); // Save game state when a player wins
                 break;
             }
         }
@@ -143,10 +210,167 @@ class LudoGame{
             if(!this.player1.playing && !this.player2.playing && !this.player3.playing && !this.player4.playing){
                 this.currPlayer = this.currPlayer.nextPlayer;
                 this.currPlayer.playing = true;
+                this.saveGameState(); // Save game state when turn changes
             }
         }
     }
 
+    saveGameState(): void {
+        const playersState: { [color: string]: PlayerState } = {};
+        const playersList = [this.player1, this.player2, this.player3, this.player4];
+
+        for (const player of playersList) {
+            const piecesState: PieceState[] = player.pieces.map(piece => ({
+                id: piece.id,
+                cellId: piece.cellId,
+                jailed: piece.jailed,
+                isHome: piece.isHome,
+                pos: piece.pos,
+            }));
+
+            playersState[player.color] = {
+                color: player.color,
+                playing: player.playing,
+                pieces: piecesState,
+                diceRolled: player._dice.rolled,
+                diceNumber: player._dice.rnumber + 1, // rnumber is 0-indexed
+                turnStage: player.stage, // Assuming 'stage' corresponds to TurnStage
+                hasWon: player.hasWon,
+            };
+        }
+
+        const gameState: LudoGameState = {
+            players: playersState,
+            currentPlayerColor: this.currPlayer.color,
+            gameOver: this.gameOver,
+            winnerColor: this.winner ? this.winner.color : null,
+        };
+
+        try {
+            localStorage.setItem('ludoGameState', JSON.stringify(gameState));
+            console.log('Game state saved successfully.');
+        } catch (error) {
+            console.error('Error saving game state to localStorage:', error);
+        }
+    }
+
+    private getPlayerByColor(color: string): Player | null {
+        if (this.player1.color === color) return this.player1;
+        if (this.player2.color === color) return this.player2;
+        if (this.player3.color === color) return this.player3;
+        if (this.player4.color === color) return this.player4;
+        return null;
+    }
+
+    loadGameState(): boolean {
+        const savedStateJSON = localStorage.getItem('ludoGameState');
+        if (!savedStateJSON) {
+            console.log('No saved game state found.');
+            return false;
+        }
+
+        let loadedState: LudoGameState;
+        try {
+            loadedState = JSON.parse(savedStateJSON);
+        } catch (error) {
+            console.error('Error parsing saved game state:', error);
+            return false;
+        }
+
+        // 2. Restore Game State
+        this.gameOver = loadedState.gameOver;
+        this.winner = loadedState.winnerColor ? this.getPlayerByColor(loadedState.winnerColor) : null;
+
+        const playersList = [this.player1, this.player2, this.player3, this.player4];
+
+        // Clear board's logical piece tracking before re-populating
+        for (const cell of this.board.path.values()) {
+            cell.pieces = [];
+        }
+        // Also clear jail cells if they directly hold piece objects or IDs not covered by board.path
+        // Assuming board.jailCells might need clearing or re-initialization.
+        // The current board.jail() method assigns pieces to jail cells.
+        // Let's ensure jail cells on the board are also cleared of old piece references.
+        // The `Board` class has `jailCells: Map<string, Cell[]>;`
+        // Each `Cell` in `jailCells` also has a `pieces` array.
+        for (const color of ["red", "green", "yellow", "blue"]) {
+            const JCells = this.board.jailCells.get(color);
+            if (JCells) {
+                for (const cell of JCells) {
+                    cell.pieces = [];
+                }
+            }
+        }
+
+
+        for (const playerState of Object.values(loadedState.players)) {
+            const gamePlayer = this.getPlayerByColor(playerState.color);
+            if (gamePlayer) {
+                gamePlayer.playing = playerState.playing;
+                gamePlayer._dice.rolled = playerState.diceRolled;
+                gamePlayer._dice.rnumber = playerState.diceNumber - 1; // Adjust back to 0-indexed
+                gamePlayer.stage = playerState.turnStage;
+                gamePlayer.hasWon = playerState.hasWon;
+
+                for (const pieceState of playerState.pieces) {
+                    const gamePiece = gamePlayer.pieces.find(p => p.id === pieceState.id);
+                    if (gamePiece) {
+                        gamePiece.cellId = pieceState.cellId;
+                        gamePiece.jailed = pieceState.jailed;
+                        gamePiece.isHome = pieceState.isHome;
+                        gamePiece.pos = pieceState.pos;
+
+                        // Visual and board cell updates will be done in a second pass
+                    }
+                }
+            }
+        }
+
+        // Second pass for visual updates and board cell population
+        for (const player of playersList) {
+            for (const piece of player.pieces) {
+                if (piece.jailed) {
+                    // board.jail moves the piece to a jail cell and updates its transform and cellId
+                    this.board.jail(piece, piece.color);
+                } else {
+                    const cell = this.board.path.get(piece.cellId);
+                    if (cell) {
+                        piece.transform.x = cell.transform.x;
+                        piece.transform.y = cell.transform.y;
+                        piece.targetTransform.x = cell.transform.x;
+                        piece.targetTransform.y = cell.transform.y;
+                        cell.putPiece(piece); // Add piece to cell's logical tracking
+                    } else {
+                        console.warn(`Cell with id ${piece.cellId} not found for piece ${piece.id}`);
+                        // Potentially place it in a default/error location or re-jail it
+                        // For now, if cellId is invalid, it might float if not jailed.
+                        // If it was supposed to be home, its cellId should be a home cell ID.
+                    }
+                }
+            }
+        }
+
+        // 3. Restore Current Player
+        const currentLoadedPlayer = this.getPlayerByColor(loadedState.currentPlayerColor);
+        if (currentLoadedPlayer) {
+            this.currPlayer = currentLoadedPlayer;
+            // Ensure `playing` status is correctly set for all players based on current player
+            for (const p of playersList) {
+                p.playing = (p === this.currPlayer && !this.gameOver);
+            }
+        } else {
+            console.error("Could not find current player from loaded state.");
+            // Fallback or error handling: maybe set player1 as current?
+            this.currPlayer = this.player1; // Or handle as an error state
+            for (const p of playersList) { // ensure others are not playing
+                p.playing = (p === this.currPlayer && !this.gameOver);
+            }
+        }
+
+
+        console.log('Game state loaded successfully.');
+        return true;
+    }
 }
 
 
